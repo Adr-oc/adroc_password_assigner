@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- Main menu under Accounting > Configuration -->
+    <menuitem id="menu_password_assigner_root"
+              name="Asignador de Contraseñas"
+              parent="account.menu_finance_configuration"
+              sequence="100"/>
+
+    <!-- Submenu: Configurations -->
+    <menuitem id="menu_password_assigner_config"
+              name="Configuración IA"
+              parent="menu_password_assigner_root"
+              action="action_password_assigner_config"
+              sequence="10"/>
+
+    <!-- Submenu: Templates -->
+    <menuitem id="menu_password_assigner_template"
+              name="Plantillas de Parsing"
+              parent="menu_password_assigner_root"
+              action="action_password_assigner_template"
+              sequence="20"/>
+
+</odoo>

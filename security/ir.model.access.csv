@@ -1,0 +1,11 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_password_assigner_config_user,password.assigner.config.user,model_password_assigner_config,account.group_account_invoice,1,0,0,0
+access_password_assigner_config_manager,password.assigner.config.manager,model_password_assigner_config,account.group_account_manager,1,1,1,1
+access_password_assigner_config_base,password.assigner.config.base,model_password_assigner_config,base.group_user,1,0,0,0
+access_password_assigner_template_user,password.assigner.template.user,model_password_assigner_template,account.group_account_invoice,1,0,0,0
+access_password_assigner_template_manager,password.assigner.template.manager,model_password_assigner_template,account.group_account_manager,1,1,1,1
+access_password_assigner_template_base,password.assigner.template.base,model_password_assigner_template,base.group_user,1,0,0,0
+access_password_assigner_wizard_user,password.assigner.wizard.user,model_password_assigner_wizard,account.group_account_invoice,1,1,1,1
+access_password_assigner_wizard_base,password.assigner.wizard.base,model_password_assigner_wizard,base.group_user,1,1,1,1
+access_password_assigner_wizard_line_user,password.assigner.wizard.line.user,model_password_assigner_wizard_line,account.group_account_invoice,1,1,1,1
+access_password_assigner_wizard_line_base,password.assigner.wizard.line.base,model_password_assigner_wizard_line,base.group_user,1,1,1,1
