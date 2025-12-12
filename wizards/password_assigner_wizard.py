@@ -601,7 +601,7 @@ IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
             return matched, 'multiple', 70.0
 
         # Try partial match - number contains extracted value
-        partial_domain = domain + [
+        partial_domain = base_domain + [
             '|', '|',
             ('invoice_number', 'ilike', f'%{clean_number}%'),
             ('name', 'ilike', f'%{clean_number}%'),
