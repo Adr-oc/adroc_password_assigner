@@ -417,31 +417,68 @@ class PasswordAssignerWizard(models.TransientModel):
             return None
 
     def _process_image_pdf(self, attachment, file_content, filename, mime_type):
-        """Procesa imagen o PDF - primero intenta OCR/tabla, luego IA"""
+        """
+        Procesa imagen o PDF con el siguiente orden de prioridad:
+        1. pdfplumber (extracción de tablas) - más rápido y gratis
+        2. PDF directo a OpenAI - funciona bien con PDFs con texto
+        3. Convertir PDF a imágenes - fallback para PDFs escaneados
+        """
 
         # Para PDFs, intentar primero extracción de tablas (más rápido y preciso)
         if mime_type == 'application/pdf' and PDFPLUMBER_AVAILABLE:
-            _logger.info('Attempting table extraction with pdfplumber for: %s', filename)
+            _logger.info('Paso 1: Intentando extracción de tablas con pdfplumber: %s', filename)
             table_results = self._extract_tables_from_pdf(file_content, filename)
             if table_results:
-                _logger.info('Successfully extracted %d passwords from PDF tables', len(table_results))
+                _logger.info('✓ pdfplumber extrajo %d contraseñas exitosamente', len(table_results))
                 return table_results
-            _logger.info('No tables found or extraction failed, falling back to AI')
+            _logger.info('pdfplumber no encontró tablas válidas, continuando...')
 
-        # Fallback a IA
+        # Verificar que hay configuración de IA
         if not self.config_id:
             raise UserError(_(
                 'Debe seleccionar una configuración de IA para procesar imágenes/PDFs.\n'
                 'Archivo: %s'
             ) % filename)
 
-        # Call OpenAI API
-        response_data = self._call_openai_extraction(file_content, filename, mime_type)
+        # Para PDFs, intentar enviar directo a OpenAI primero
+        if mime_type == 'application/pdf':
+            _logger.info('Paso 2: Enviando PDF directo a OpenAI: %s', filename)
+            try:
+                response_data = self._call_openai_extraction(
+                    file_content, filename, mime_type, use_images=False
+                )
+                # Verificar si extrajo datos útiles
+                if response_data and response_data.get('passwords'):
+                    passwords = response_data.get('passwords', [])
+                    total_invoices = sum(len(p.get('invoices', [])) for p in passwords)
+                    if total_invoices > 0:
+                        _logger.info('✓ PDF directo extrajo %d contraseñas con %d facturas',
+                                   len(passwords), total_invoices)
+                        return self._parse_openai_response(response_data)
+                    _logger.info('PDF directo no extrajo facturas, probando con imágenes...')
+                else:
+                    _logger.info('PDF directo no extrajo datos, probando con imágenes...')
+            except Exception as e:
+                _logger.warning('Error con PDF directo: %s, probando con imágenes...', str(e))
+
+            # Fallback: Convertir PDF a imágenes
+            _logger.info('Paso 3: Convirtiendo PDF a imágenes: %s', filename)
+            response_data = self._call_openai_extraction(
+                file_content, filename, mime_type, use_images=True
+            )
+        else:
+            # Para imágenes, enviar directamente
+            response_data = self._call_openai_extraction(
+                file_content, filename, mime_type, use_images=False
+            )
 
         if not response_data:
             return []
 
-        # Parse response
+        return self._parse_openai_response(response_data)
+
+    def _parse_openai_response(self, response_data):
+        """Parsea la respuesta de OpenAI y retorna lista de resultados"""
         passwords = response_data.get('passwords', [])
         results = []
 
@@ -504,12 +541,21 @@ class PasswordAssignerWizard(models.TransientModel):
             _logger.exception('Error converting PDF to images')
             raise UserError(_('Error al convertir PDF a imágenes: %s') % str(e))
 
-    def _call_openai_extraction(self, file_content, filename, mime_type):
-        """Llama a OpenAI API para extraer información del documento"""
+    def _call_openai_extraction(self, file_content, filename, mime_type, use_images=False):
+        """
+        Llama a OpenAI API para extraer información del documento.
+
+        Args:
+            file_content: Contenido binario del archivo
+            filename: Nombre del archivo
+            mime_type: Tipo MIME del archivo
+            use_images: Si True, convierte PDF a imágenes. Si False, envía PDF directo.
+        """
         config = self.config_id
 
         # Prepare content blocks
         content_blocks = []
+        page_count = 1
 
         if mime_type.startswith('image/'):
             # Imagen directa
@@ -519,30 +565,50 @@ class PasswordAssignerWizard(models.TransientModel):
                 "image_url": f"data:{mime_type};base64,{data_b64}"
             })
         elif mime_type == 'application/pdf':
-            # Convertir PDF a imágenes para evitar bugs de la Responses API con PDFs
-            _logger.info('Converting PDF to images for better OCR support...')
-            pdf_images = self._convert_pdf_to_images(file_content)
+            if use_images:
+                # Convertir PDF a imágenes (fallback para PDFs escaneados)
+                _logger.info('Convirtiendo PDF a imágenes para mejor OCR...')
+                pdf_images = self._convert_pdf_to_images(file_content)
 
-            # Agregar cada página como imagen (máximo 10 páginas por request)
-            max_pages = min(len(pdf_images), 10)
-            if len(pdf_images) > 10:
-                _logger.warning('PDF has %d pages, only processing first 10', len(pdf_images))
+                # Agregar cada página como imagen (máximo 10 páginas por request)
+                max_pages = min(len(pdf_images), 10)
+                if len(pdf_images) > 10:
+                    _logger.warning('PDF tiene %d páginas, procesando solo las primeras 10', len(pdf_images))
 
-            for img_data in pdf_images[:max_pages]:
+                for img_data in pdf_images[:max_pages]:
+                    content_blocks.append({
+                        "type": "input_image",
+                        "image_url": f"data:{img_data['mime']};base64,{img_data['base64']}"
+                    })
+                page_count = len(content_blocks)
+            else:
+                # Enviar PDF directo (más eficiente para PDFs con texto)
+                _logger.info('Enviando PDF directo a OpenAI (sin convertir a imágenes)...')
+                data_b64 = base64.b64encode(file_content).decode('utf-8')
                 content_blocks.append({
-                    "type": "input_image",
-                    "image_url": f"data:{img_data['mime']};base64,{img_data['base64']}"
+                    "type": "input_file",
+                    "filename": filename,
+                    "file_data": f"data:application/pdf;base64,{data_b64}"
                 })
+                # Estimar páginas del PDF
+                try:
+                    if PDFPLUMBER_AVAILABLE:
+                        import pdfplumber
+                        pdf_buffer = io.BytesIO(file_content)
+                        with pdfplumber.open(pdf_buffer) as pdf:
+                            page_count = len(pdf.pages)
+                except Exception:
+                    page_count = 1
 
         # Add text prompt with page context for multi-page
         page_context = ""
-        if mime_type == 'application/pdf' and len(content_blocks) > 1:
+        if mime_type == 'application/pdf' and page_count > 1:
             page_context = f"""
 
 IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
-- Este documento tiene {len(content_blocks)} páginas
+- Este documento tiene {page_count} páginas
 - Debes extraer TODAS las facturas de TODAS las páginas
-- La tabla de facturas continúa en la página 2
+- La tabla de facturas continúa en las páginas siguientes
 - Combina todas las facturas bajo UNA sola contraseña (si es el mismo número)
 - NO omitas ninguna fila de la tabla"""
 
