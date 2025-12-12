@@ -152,9 +152,85 @@ class PasswordAssignerWizardLine(models.TransientModel):
         if self.invoice_ids:
             if self.match_status == 'not_found':
                 self.match_status = 'manual'
+                self.apply = True
         else:
             if self.match_status not in ['not_found']:
                 self.notes = (self.notes or '') + '\nFacturas removidas manualmente.'
+
+    @api.onchange('invoice_number_extracted')
+    def _onchange_invoice_number_extracted(self):
+        """Busca facturas automáticamente cuando se cambia el número extraído"""
+        if not self.invoice_number_extracted:
+            return
+
+        clean_number = self.invoice_number_extracted.strip()
+        if len(clean_number) < 3:
+            return  # Muy corto para buscar
+
+        company_id = self.wizard_id.company_id.id if self.wizard_id else self.env.company.id
+
+        # Buscar en campos de factura
+        AccountMove = self.env['account.move']
+        AccountMoveLine = self.env['account.move.line']
+
+        base_domain = [
+            ('move_type', 'in', ['out_invoice', 'out_refund']),
+            ('state', '=', 'posted'),
+            ('company_id', '=', company_id),
+            '|',
+            ('document_password', '=', False),
+            ('document_password', '=', ''),
+        ]
+
+        # Buscar en invoice_number, name, ref
+        search_domain = base_domain + [
+            '|', '|', '|',
+            ('invoice_number', 'ilike', clean_number),
+            ('name', 'ilike', clean_number),
+            ('ref', 'ilike', clean_number),
+            ('invoice_number', 'ilike', f'%{clean_number}%'),
+        ]
+
+        matched = AccountMove.search(search_domain, limit=10)
+
+        # Si no encontró, buscar en líneas de factura
+        if not matched:
+            line_domain = [
+                ('move_id.move_type', 'in', ['out_invoice', 'out_refund']),
+                ('move_id.state', '=', 'posted'),
+                ('move_id.company_id', '=', company_id),
+                '|',
+                ('move_id.document_password', '=', False),
+                ('move_id.document_password', '=', ''),
+                ('name', 'ilike', clean_number),
+            ]
+            lines = AccountMoveLine.search(line_domain, limit=10)
+            if lines:
+                matched = lines.mapped('move_id')
+
+        if matched:
+            # Si hay monto, filtrar por monto similar
+            if self.amount_extracted and len(matched) > 1:
+                amount_matched = matched.filtered(
+                    lambda m: abs(m.amount_total - self.amount_extracted) < 1.0
+                )
+                if amount_matched:
+                    matched = amount_matched
+
+            self.invoice_ids = [(6, 0, matched.ids)]
+            self.match_status = 'manual'
+            self.apply = True
+            self.match_confidence = 85.0
+
+            if len(matched) == 1:
+                self.notes = f"✓ Encontrada: {matched.name}"
+            else:
+                self.notes = f"Encontradas {len(matched)} facturas. Verifica cuál es la correcta."
+        else:
+            self.invoice_ids = [(5, 0, 0)]  # Clear
+            self.match_status = 'not_found'
+            self.apply = False
+            self.notes = f"No se encontró factura para: {clean_number}"
 
     def action_open_invoices(self):
         """Abre las facturas relacionadas en una vista"""

@@ -23,6 +23,16 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# PDF table extraction - optional dependency
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+    _logger.warning('pdfplumber not available. Table extraction will use AI only.')
+
+import re
+
 
 class PasswordAssignerWizard(models.TransientModel):
     _name = 'password.assigner.wizard'
@@ -265,8 +275,160 @@ class PasswordAssignerWizard(models.TransientModel):
             for data in passwords.values()
         ]
 
+    def _extract_tables_from_pdf(self, file_content, filename):
+        """
+        Extrae tablas de un PDF usando pdfplumber.
+        Retorna lista de contraseñas con sus facturas si encuentra tablas válidas.
+        """
+        if not PDFPLUMBER_AVAILABLE:
+            return None
+
+        try:
+            pdf_buffer = io.BytesIO(file_content)
+            password_number = None
+            issuer_name = None
+            all_invoices = []
+
+            with pdfplumber.open(pdf_buffer) as pdf:
+                for page_num, page in enumerate(pdf.pages):
+                    # Extraer texto de la página para buscar contraseña y emisor
+                    page_text = page.extract_text() or ''
+
+                    # Buscar número de contraseña en el texto
+                    if not password_number:
+                        # Patrones comunes: "No. DIS - 5994", "Contraseña: 055648", "No. 12345"
+                        pwd_patterns = [
+                            r'No\.\s*([A-Z]{2,4}\s*-?\s*\d+)',  # DIS - 5994, CAR-1234
+                            r'Contraseña[:\s]+(\d+)',
+                            r'Nº?\.\s*(\d+)',
+                            r'No\.\s+(\d+)',
+                        ]
+                        for pattern in pwd_patterns:
+                            match = re.search(pattern, page_text, re.IGNORECASE)
+                            if match:
+                                password_number = match.group(1).strip()
+                                break
+
+                    # Buscar nombre del emisor
+                    if not issuer_name:
+                        issuer_patterns = [
+                            r'(DISTELSA|CARTOGUA|La Popular|Carton Box|GRUPO\s+\w+)',
+                            r'Contraseña de pago\s+([A-Z][A-Za-z\s]+)',
+                        ]
+                        for pattern in issuer_patterns:
+                            match = re.search(pattern, page_text, re.IGNORECASE)
+                            if match:
+                                issuer_name = match.group(1).strip()
+                                break
+
+                    # Extraer tablas de la página
+                    tables = page.extract_tables()
+
+                    for table in tables:
+                        if not table or len(table) < 2:
+                            continue
+
+                        # Detectar columnas de factura y monto
+                        header = table[0] if table[0] else []
+                        header_lower = [str(h).lower() if h else '' for h in header]
+
+                        # Buscar índices de columnas
+                        factura_idx = None
+                        monto_idx = None
+
+                        for i, h in enumerate(header_lower):
+                            if 'factura' in h or 'número' in h or 'no.' in h:
+                                factura_idx = i
+                            if 'monto' in h or 'total' in h or 'importe' in h:
+                                monto_idx = i
+
+                        # Si no encontró headers, intentar detectar por posición
+                        # Típicamente: # | Factura | Monto
+                        if factura_idx is None and len(header) >= 2:
+                            # Asumir segunda columna es factura
+                            factura_idx = 1
+                        if monto_idx is None and len(header) >= 3:
+                            # Asumir última columna es monto
+                            monto_idx = len(header) - 1
+
+                        if factura_idx is None:
+                            continue
+
+                        # Procesar filas de datos (saltar header)
+                        for row in table[1:]:
+                            if not row or len(row) <= factura_idx:
+                                continue
+
+                            invoice_num = str(row[factura_idx] or '').strip()
+                            if not invoice_num or invoice_num.lower() in ['', 'none', 'null', 'factura']:
+                                continue
+
+                            # Extraer monto si existe
+                            amount = 0.0
+                            if monto_idx is not None and len(row) > monto_idx:
+                                monto_str = str(row[monto_idx] or '').strip()
+                                # Limpiar formato de número: "1,606.58" -> 1606.58
+                                monto_clean = re.sub(r'[^\d.,]', '', monto_str)
+                                monto_clean = monto_clean.replace(',', '')
+                                try:
+                                    amount = float(monto_clean) if monto_clean else 0.0
+                                except ValueError:
+                                    amount = 0.0
+
+                            all_invoices.append({
+                                'invoice_number': invoice_num,
+                                'invoice_series': None,
+                                'amount': amount,
+                                'currency': 'Q',
+                                'date': None,
+                            })
+
+            # Si encontramos facturas, retornar resultado
+            if all_invoices and password_number:
+                _logger.info('Extracted %d invoices from PDF tables, password: %s',
+                           len(all_invoices), password_number)
+                return [{
+                    'password_number': password_number,
+                    'issuer_name': issuer_name or '',
+                    'invoices': all_invoices,
+                    'source': 'table_extraction',
+                    'confidence': 95,
+                }]
+
+            # Si encontramos facturas pero no contraseña, intentar extraer del nombre del archivo
+            if all_invoices and not password_number:
+                # Intentar extraer del nombre: "DIS-5994- MEGAPOLIZAS.pdf"
+                match = re.search(r'([A-Z]{2,4}-?\d+)', filename)
+                if match:
+                    password_number = match.group(1)
+                    _logger.info('Extracted password from filename: %s', password_number)
+                    return [{
+                        'password_number': password_number,
+                        'issuer_name': issuer_name or '',
+                        'invoices': all_invoices,
+                        'source': 'table_extraction',
+                        'confidence': 85,
+                    }]
+
+            return None
+
+        except Exception as e:
+            _logger.warning('Error extracting tables from PDF: %s', str(e))
+            return None
+
     def _process_image_pdf(self, attachment, file_content, filename, mime_type):
-        """Procesa imagen o PDF usando OpenAI"""
+        """Procesa imagen o PDF - primero intenta OCR/tabla, luego IA"""
+
+        # Para PDFs, intentar primero extracción de tablas (más rápido y preciso)
+        if mime_type == 'application/pdf' and PDFPLUMBER_AVAILABLE:
+            _logger.info('Attempting table extraction with pdfplumber for: %s', filename)
+            table_results = self._extract_tables_from_pdf(file_content, filename)
+            if table_results:
+                _logger.info('Successfully extracted %d passwords from PDF tables', len(table_results))
+                return table_results
+            _logger.info('No tables found or extraction failed, falling back to AI')
+
+        # Fallback a IA
         if not self.config_id:
             raise UserError(_(
                 'Debe seleccionar una configuración de IA para procesar imágenes/PDFs.\n'
