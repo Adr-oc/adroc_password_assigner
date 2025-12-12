@@ -313,14 +313,21 @@ class PasswordAssignerWizard(models.TransientModel):
             raise UserError(_('La librería Pillow no está instalada. Ejecute: pip install Pillow'))
 
         try:
-            # Convertir PDF a imágenes (150 DPI es suficiente para OCR)
-            images = convert_from_bytes(pdf_content, dpi=150, fmt='jpeg')
+            # Convertir PDF a imágenes (100 DPI para balance velocidad/calidad)
+            images = convert_from_bytes(pdf_content, dpi=100, fmt='jpeg')
 
             result = []
             for i, img in enumerate(images):
-                # Convertir imagen a base64
+                # Redimensionar si es muy grande (max 1500px de ancho)
+                max_width = 1500
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    new_size = (max_width, int(img.height * ratio))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+                # Convertir imagen a base64 (calidad 75 para reducir tamaño)
                 buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=85)
+                img.save(buffer, format='JPEG', quality=75)
                 img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
                 result.append({
                     'page': i + 1,
@@ -367,12 +374,19 @@ class PasswordAssignerWizard(models.TransientModel):
 
         # Add text prompt with page context for multi-page
         page_context = ""
-        if mime_type == 'application/pdf':
-            page_context = f" El documento tiene {len(content_blocks)} página(s). Analiza cada página."
+        if mime_type == 'application/pdf' and len(content_blocks) > 1:
+            page_context = f"""
+
+IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
+- Este documento tiene {len(content_blocks)} páginas
+- Debes extraer TODAS las facturas de TODAS las páginas
+- La tabla de facturas continúa en la página 2
+- Combina todas las facturas bajo UNA sola contraseña (si es el mismo número)
+- NO omitas ninguna fila de la tabla"""
 
         content_blocks.append({
             "type": "input_text",
-            "text": f"Analiza este documento y extrae la información de contraseñas de pago y facturas según las instrucciones.{page_context}"
+            "text": f"Analiza este documento y extrae la información de contraseñas de pago y TODAS las facturas según las instrucciones.{page_context}"
         })
 
         # Build payload
@@ -390,7 +404,9 @@ class PasswordAssignerWizard(models.TransientModel):
                     "schema": json.loads(config.json_schema)['schema'],
                     "strict": True
                 }
-            }
+            },
+            # Aumentar tokens de salida para documentos con muchas facturas
+            "max_output_tokens": 16000,
         }
 
         headers = {

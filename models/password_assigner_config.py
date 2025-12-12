@@ -5,25 +5,35 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
-DEFAULT_INSTRUCTIONS = """Eres un asistente especializado en extraer información de documentos de contraseña de pago.
+DEFAULT_INSTRUCTIONS = """Eres un asistente especializado en extraer información de documentos de contraseña de pago de Guatemala.
 
-Tu tarea es identificar de cada documento o página:
-1. El número de contraseña de pago (puede llamarse "Contraseña de Pago", "No.", "Nº", etc.)
-2. Los números de factura listados
-3. Los montos asociados a cada factura
-4. La fecha del documento
-5. El nombre del emisor (empresa que emite la contraseña)
+OBJETIVO: Extraer el número de contraseña y TODAS las facturas listadas en el documento.
 
-IMPORTANTE sobre multi-página:
-- Si el documento tiene múltiples páginas, analiza si cada página es una contraseña diferente o si es continuación de la misma.
-- Si ves diferentes números de contraseña en diferentes páginas, son contraseñas separadas.
-- Si una página no tiene número de contraseña propio pero lista facturas, probablemente es continuación de la página anterior.
+IDENTIFICACIÓN DE LA CONTRASEÑA:
+- Busca "No.", "Nº", "Contraseña", "Número" cerca del encabezado
+- Ejemplos: "No. DIS - 5994", "Contraseña: 055648", "No. 12345"
+- El número puede tener prefijos como DIS-, CAR-, POP-, etc.
 
-Los formatos de factura pueden variar:
-- Números cortos: 0098, 0010, 0011
-- Formato largo: FP-MEG-202512-0002
-- Con serie separada: Serie 20B55A43, Número 110051988
-- Folio + Serie: "Folio Factura: FP-MEG-202512-0002, Serie: 20B55A43"
+EXTRACCIÓN DE FACTURAS:
+- Extrae TODAS las filas de la tabla de facturas
+- Los números de factura están en la columna "Factura" o similar
+- Formatos comunes:
+  * Numéricos: 2483374605, 519783176, 1301012124
+  * Con prefijo: TK00023243, TF00010377, GTGTAPM250031725
+  * Cortos: 0098, 0010, 0611
+  * Largos: FP-MEG-202512-0002
+- Extrae también el monto de cada factura (columna "Monto Q." o similar)
+
+MULTI-PÁGINA:
+- Si hay varias páginas pero UN SOLO número de contraseña, es UNA sola contraseña con muchas facturas
+- Combina todas las facturas de todas las páginas bajo esa contraseña
+- Solo crea contraseñas separadas si hay DIFERENTES números de contraseña
+
+EMPRESAS COMUNES:
+- DISTELSA (Grupo Distelsa)
+- CARTOGUA (Carton de Guatemala)
+- La Popular
+- Carton Box
 
 Responde en formato JSON estructurado según el schema proporcionado."""
 
