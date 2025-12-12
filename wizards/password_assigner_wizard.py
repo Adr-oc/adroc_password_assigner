@@ -507,12 +507,15 @@ IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
         """
         Busca facturas que coincidan con los datos extraídos.
         Match parcial: busca si el número extraído aparece en cualquier parte de invoice_number.
+        También busca en las líneas de factura (descripción del producto).
 
         Returns:
             tuple: (matched_invoices recordset, match_status, confidence)
         """
         AccountMove = self.env['account.move']
-        domain = [
+        AccountMoveLine = self.env['account.move.line']
+
+        base_domain = [
             ('move_type', 'in', ['out_invoice', 'out_refund']),
             ('state', '=', 'posted'),
             ('company_id', '=', self.company_id.id),
@@ -525,8 +528,8 @@ IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
         # Clean invoice number for search
         clean_number = invoice_number.strip()
 
-        # Try exact match first
-        exact_domain = domain + [
+        # 1. Try exact match in invoice fields first
+        exact_domain = base_domain + [
             '|', '|', '|',
             ('invoice_number', '=', clean_number),
             ('invoice_number', 'ilike', clean_number),
@@ -538,6 +541,41 @@ IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
 
         if len(matched) == 1:
             return matched, 'matched', 100.0
+
+        # 2. If no match, search in invoice line descriptions (e.g., "POLTT2483374605")
+        if not matched:
+            # Search in invoice lines
+            line_domain = [
+                ('move_id.move_type', 'in', ['out_invoice', 'out_refund']),
+                ('move_id.state', '=', 'posted'),
+                ('move_id.company_id', '=', self.company_id.id),
+                '|',
+                ('move_id.document_password', '=', False),
+                ('move_id.document_password', '=', ''),
+                '|',
+                ('name', 'ilike', clean_number),
+                ('name', 'ilike', f'%{clean_number}%'),
+            ]
+
+            lines = AccountMoveLine.search(line_domain, limit=20)
+            if lines:
+                matched = lines.mapped('move_id')
+                if len(matched) == 1:
+                    return matched, 'matched', 95.0
+                if matched:
+                    # Filter by amount if available
+                    if amount:
+                        amount_matched = matched.filtered(
+                            lambda m: abs(m.amount_total - amount) < 1.0
+                        )
+                        if len(amount_matched) == 1:
+                            return amount_matched, 'matched', 90.0
+                        if amount_matched:
+                            matched = amount_matched
+
+                    if len(matched) == 1:
+                        return matched, 'matched', 85.0
+                    return matched, 'multiple', 70.0
 
         if len(matched) > 1:
             # Try to narrow down with series
@@ -553,7 +591,7 @@ IMPORTANTE - DOCUMENTO MULTI-PÁGINA:
             # Try to narrow down with amount
             if amount:
                 amount_matched = matched.filtered(
-                    lambda m: abs(m.amount_total - amount) < 0.01
+                    lambda m: abs(m.amount_total - amount) < 1.0
                 )
                 if len(amount_matched) == 1:
                     return amount_matched, 'matched', 90.0
